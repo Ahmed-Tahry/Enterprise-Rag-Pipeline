@@ -139,10 +139,13 @@ class EvalRequest(BaseModel):
 
 
 class IngestResponse(BaseModel):
-    status:        str
-    files_indexed: int
-    chunks_added:  int
-    latency_ms:    float
+    status:          str
+    files_indexed:   int
+    chunks_added:    int
+    latency_ms:      float
+    chunk_strategy:  str = "recursive"
+    chunk_size:      int = 512
+    chunk_overlap:   int = 64
 
 
 # ── App ──────────────────────────────────────────────────────────────────
@@ -198,17 +201,30 @@ async def stats(app: FastAPI = Depends(lambda: None)):
 
 
 @app.post("/ingest", response_model=IngestResponse)
-async def ingest_documents(files: List[UploadFile] = File(...), app: FastAPI = Depends(lambda: None)):
+async def ingest_documents(
+    files: List[UploadFile] = File(...),
+    chunk_strategy: str = "recursive",
+    chunk_size: int = 512,
+    chunk_overlap: int = 64,
+    app: FastAPI = Depends(lambda: None),
+):
     """
     Upload and index one or more documents.
     
     Supports: PDF, DOCX, HTML, TXT, MD
+    
+    Chunk strategies: recursive (default), markdown, semantic
     """
+    from src.ingestion.chunker import ChunkConfig, get_chunker
+
     p   = app.state.pipeline
     t0  = time.perf_counter()
 
     filenames = [f.filename for f in files]
-    logger.info(f"Ingesting {len(files)} files: {filenames}")
+    logger.info(f"Ingesting {len(files)} files: {filenames} | strategy={chunk_strategy}")
+
+    chunk_cfg = ChunkConfig(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    chunker = get_chunker(chunk_strategy, config=chunk_cfg)
 
     all_chunks = []
     n_files    = 0
@@ -232,7 +248,7 @@ async def ingest_documents(files: List[UploadFile] = File(...), app: FastAPI = D
 
             try:
                 docs   = p["loader"].load(str(tmp_path))
-                chunks = p["chunker"].split_documents(docs)
+                chunks = chunker.split_documents(docs)
                 all_chunks.extend(chunks)
                 n_files += 1
                 logger.info(f"Loaded {safe_name}: {len(docs)} pages, {len(chunks)} chunks")
@@ -257,10 +273,13 @@ async def ingest_documents(files: List[UploadFile] = File(...), app: FastAPI = D
     latency_ms = (time.perf_counter() - t0) * 1000
 
     return IngestResponse(
-        status        = "success",
-        files_indexed = n_files,
-        chunks_added  = len(all_chunks),
-        latency_ms    = round(latency_ms, 1),
+        status         = "success",
+        files_indexed  = n_files,
+        chunks_added   = len(all_chunks),
+        latency_ms     = round(latency_ms, 1),
+        chunk_strategy = chunk_strategy,
+        chunk_size     = chunk_size,
+        chunk_overlap  = chunk_overlap,
     )
 
 
