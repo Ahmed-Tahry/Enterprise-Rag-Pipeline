@@ -216,3 +216,89 @@ def test_bm25_unknown_term():
     # Term not in corpus
     results = bm25.search("xyzzy_notaword_12345", top_k=5)
     assert results == []  # No matches for unknown terms
+
+
+# ============================================================
+# tests/test_hallucination.py — Hallucination detection tests
+# ============================================================
+
+import numpy as np
+from src.evaluation.hallucination_detector import (
+    EmbeddingHallucinationDetector,
+    LLMHallucinationDetector,
+    HallucinationResult,
+)
+
+
+class MockEmbedder:
+    """Returns deterministic embeddings for testing."""
+    dimension = 4
+
+    def embed_documents(self, texts):
+        rng = np.random.RandomState(sum(ord(c) for t in texts for c in t))
+        embs = rng.randn(len(texts), self.dimension).astype(np.float32)
+        embs /= np.linalg.norm(embs, axis=1, keepdims=True)
+        return embs
+
+    def embed_query(self, query):
+        return self.embed_documents([query])[0]
+
+
+class MockLLM:
+    """Returns predefined verdict for hallucination tests."""
+    def __init__(self, verdict="SUPPORTED"):
+        self.verdict = verdict
+
+    def generate(self, system, user):
+        return f"VERDICT: {self.verdict}\nREASON: Test reason."
+
+
+def test_hallucination_extract_claims():
+    detector = EmbeddingHallucinationDetector(MockEmbedder())
+    claims = detector._extract_claims("This is a claim. This is another one. [Source 1]")
+    assert len(claims) == 2
+    assert "[Source 1]" not in claims[1]
+
+
+def test_hallucination_empty_no_context():
+    detector = EmbeddingHallucinationDetector(MockEmbedder())
+    result = detector.detect("Some answer.", [])
+    assert result.faithfulness_score == 1.0
+    assert not result.is_hallucination
+
+
+def test_hallucination_empty_answer():
+    detector = EmbeddingHallucinationDetector(MockEmbedder())
+    result = detector.detect("", ["Some context."])
+    assert result.faithfulness_score == 1.0
+    assert not result.is_hallucination
+
+
+def test_hallucination_risk_level_property():
+    assert HallucinationResult(False, 0.0, "test", [], 0.80).risk_level == "LOW"
+    assert HallucinationResult(False, 0.0, "test", [], 0.60).risk_level == "MEDIUM"
+    assert HallucinationResult(True,  0.0, "test", [], 0.30).risk_level == "HIGH"
+
+
+def test_hallucination_llm_parse_verdict():
+    llm = MockLLM()
+    detector = LLMHallucinationDetector(llm)
+    result = detector.detect("This is a test claim about something.", ["Some context here."])
+    assert result.method == "llm_nli"
+    assert result.faithfulness_score == 1.0
+    assert not result.is_hallucination
+
+
+def test_hallucination_llm_not_supported():
+    llm = MockLLM(verdict="NOT_SUPPORTED")
+    detector = LLMHallucinationDetector(llm)
+    result = detector.detect("This is a test claim.", ["Some context here."])
+    assert result.is_hallucination
+    assert len(result.flagged_claims) > 0
+
+
+def test_llm_extract_claims_no_citations():
+    detector = LLMHallucinationDetector(MockLLM())
+    claims = detector._extract_claims("Claim one is true. Claim two is also true. [Source 1]")
+    assert len(claims) == 2
+    assert all("[Source" not in c for c in claims)
