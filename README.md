@@ -7,33 +7,33 @@ Employees ask natural-language questions about internal documents (PDF, DOCX, HT
 ## Architecture
 
 ```mermaid
-flowchart LR
-    subgraph Ingestion
-        A[Documents<br/>PDF/DOCX/HTML/TXT/MD] --> B[DocumentLoader]
-        B --> C[Chunker<br/>Recursive / Markdown / Semantic]
-        C --> D[Embedder<br/>BGE / OpenAI]
-        D --> E[(FAISS Index)]
-        D --> F[(BM25 Index)]
+flowchart TB
+    subgraph INGESTION
+        direction TB
+        A1[PDF / DOCX / HTML / TXT / MD] --> A2[Document Loader]
+        A2 --> A3[Chunker<br>Recursive / Markdown / Semantic]
+        A3 --> A4[Embedder<br>BGE / OpenAI]
+        A4 --> A5[(FAISS Vector Store)]
+        A4 --> A6[(BM25 Index)]
     end
 
-    subgraph Retrieval
-        G[User Query] --> H[Dense Search]
-        G --> I[BM25 Search]
-        H --> J[RRF Fusion]
-        I --> J
-        J --> K[Cross-encoder<br/>Reranker]
-        K --> L[Top-5 Chunks]
+    subgraph RETRIEVAL
+        direction TB
+        B1[User Query] --> B2{Dense + BM25}
+        A5 --> B2
+        A6 --> B2
+        B2 --> B3[RRF Fusion]
+        B3 --> B4[Cross-encoder Reranker]
+        B4 --> B5[Top-5 Chunks]
     end
 
-    subgraph Generation
-        M[System + Context + Question] --> N[LLM<br/>GPT-4o-mini / Claude]
-        N --> O[Hallucination<br/>Detector]
-        O --> P[Answer + Sources<br/>+ Risk Level]
+    subgraph GENERATION
+        direction TB
+        B5 --> C1[Prompt: System + Context + Question]
+        C1 --> C2[LLM<br>GPT-4o-mini / Claude]
+        C2 --> C3[Hallucination Detector]
+        C3 --> C4[Answer + Sources + Risk Level]
     end
-
-    E --> H
-    F --> I
-    L --> M
 ```
 
 ## Quickstart
