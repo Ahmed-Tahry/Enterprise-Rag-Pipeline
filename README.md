@@ -6,21 +6,34 @@ Employees ask natural-language questions about internal documents (PDF, DOCX, HT
 
 ## Architecture
 
-```
-                         INGESTION
-  Documents             DocumentLoader -> Chunker -> Embedder
-  (PDF/DOCX/HTML/TXT) -> Recursive/Markdown/Semantic -> BGE/OpenAI -> FAISS + BM25
+```mermaid
+flowchart LR
+    subgraph Ingestion
+        A[Documents<br/>PDF/DOCX/HTML/TXT/MD] --> B[DocumentLoader]
+        B --> C[Chunker<br/>Recursive / Markdown / Semantic]
+        C --> D[Embedder<br/>BGE / OpenAI]
+        D --> E[(FAISS Index)]
+        D --> F[(BM25 Index)]
+    end
 
-                         RETRIEVAL
-  User Query -> Dense + BM25 (parallel)
-             -> RRF fusion
-             -> Cross-encoder reranker (optional)
-             -> Top-5 chunks
+    subgraph Retrieval
+        G[User Query] --> H[Dense Search]
+        G --> I[BM25 Search]
+        H --> J[RRF Fusion]
+        I --> J
+        J --> K[Cross-encoder<br/>Reranker]
+        K --> L[Top-5 Chunks]
+    end
 
-                         GENERATION
-  Prompt = System + Context + Question -> LLM (GPT-4o-mini / Claude)
-             -> Hallucination detector (embedding NLI)
-             -> Answer + Sources + Risk Level
+    subgraph Generation
+        M[System + Context + Question] --> N[LLM<br/>GPT-4o-mini / Claude]
+        N --> O[Hallucination<br/>Detector]
+        O --> P[Answer + Sources<br/>+ Risk Level]
+    end
+
+    E --> H
+    F --> I
+    L --> M
 ```
 
 ## Quickstart
