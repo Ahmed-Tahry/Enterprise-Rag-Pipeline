@@ -116,6 +116,23 @@ class OpenAILLM:
         )
         return response.choices[0].message.content.strip()
 
+    def generate_stream(self, system: str, user: str):
+        """Stream tokens from the LLM one at a time."""
+        response = self.client.chat.completions.create(
+            model=self.model,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user},
+            ],
+            stream=True,
+        )
+        for chunk in response:
+            delta = chunk.choices[0].delta
+            if delta and delta.content:
+                yield delta.content
+
 
 class AnthropicLLM:
     def __init__(
@@ -141,6 +158,18 @@ class AnthropicLLM:
             messages=[{"role": "user", "content": user}],
         )
         return response.content[0].text.strip()
+
+    def generate_stream(self, system: str, user: str):
+        """Stream tokens from the LLM one at a time."""
+        with self.client.messages.stream(
+            model=self.model,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        ) as stream:
+            for text in stream.text_stream:
+                yield text
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +266,63 @@ class RAGChain:
             model=getattr(self.llm, 'model', type(self.llm).__name__),
             has_answer=has_answer,
         )
+
+    def query_stream(self, question: str, top_k: Optional[int] = None):
+        """
+        Stream the RAG pipeline response token by token.
+        
+        Yields dicts with keys:
+          - type: "retrieval" | "token" | "sources" | "error"
+          - content: varies by type
+        """
+        k = top_k or self.top_k
+        t0 = time.perf_counter()
+
+        results = self.retriever.search(question, top_k=k)
+        if not results:
+            yield {"type": "error", "content": "No relevant documents found in the knowledge base."}
+            return
+
+        yield {"type": "retrieval", "content": len(results)}
+
+        context = build_context_block(results)
+        user_prompt = CONTEXT_TEMPLATE.format(
+            context_blocks=context,
+            question=question,
+        )
+
+        if not hasattr(self.llm, "generate_stream"):
+            answer = self.llm.generate(SYSTEM_PROMPT, user_prompt)
+            yield {"type": "token", "content": answer}
+        else:
+            full_answer = []
+            try:
+                for token in self.llm.generate_stream(SYSTEM_PROMPT, user_prompt):
+                    full_answer.append(token)
+                    yield {"type": "token", "content": token}
+            except Exception as e:
+                logger.error(f"Streaming failed, falling back to sync: {e}")
+                answer = self.llm.generate(SYSTEM_PROMPT, user_prompt)
+                yield {"type": "token", "content": answer}
+                full_answer = [answer]
+
+            answer = "".join(full_answer)
+
+        latency_ms = (time.perf_counter() - t0) * 1000
+        sources = self._extract_sources(answer, results)
+        has_answer = not any(
+            phrase in answer.lower() for phrase in self.NO_ANSWER_PHRASES
+        )
+
+        yield {
+            "type": "sources",
+            "content": {
+                "sources": sources,
+                "has_answer": has_answer,
+                "latency_ms": round(latency_ms, 1),
+                "model": getattr(self.llm, 'model', type(self.llm).__name__),
+            },
+        }
 
     def _extract_sources(
         self,

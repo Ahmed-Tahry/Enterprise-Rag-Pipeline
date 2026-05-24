@@ -13,6 +13,7 @@ Endpoints:
 """
 
 import os
+import json
 import time
 import tempfile
 import asyncio
@@ -22,6 +23,7 @@ from typing import List, Optional
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Depends
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from loguru import logger
@@ -329,6 +331,43 @@ async def query(request: QueryRequest, app: FastAPI = Depends(lambda: None)):
         model         = response.model,
         hallucination = hallucination_result,
     )
+
+
+@app.post("/query/stream")
+async def query_stream(request: QueryRequest, app: FastAPI = Depends(lambda: None)):
+    """
+    Stream the RAG pipeline response token by token (SSE format).
+    
+    Events:
+      data: {"type": "retrieval", "content": <chunk_count>}
+      data: {"type": "token", "content": "<token>"}
+      data: {"type": "sources", "content": {...}}
+    """
+    p = app.state.pipeline
+
+    if len(p["vector_store"]) == 0:
+        raise HTTPException(400, "No documents indexed yet. Use POST /ingest first.")
+
+    logger.info(f"Streaming query: '{request.question[:120]}' | top_k={request.top_k}")
+
+    async def event_stream():
+        def _stream():
+            for event in p["rag_chain"].query_stream(request.question, top_k=request.top_k):
+                yield event
+
+        loop = asyncio.get_event_loop()
+        stream_gen = await loop.run_in_executor(None, _stream)
+
+        for event in stream_gen:
+            yield f"data: {json.dumps(event)}\n\n"
+
+        def _update_stats():
+            with p["_lock"]:
+                p["stats"]["queries_handled"] += 1
+
+        await asyncio.to_thread(_update_stats)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.post("/evaluate")
