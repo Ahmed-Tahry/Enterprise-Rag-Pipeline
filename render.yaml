@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: naresh-enterprise-rag
+    runtime: docker
+    plan: free
+    dockerCommand: bash render_start.sh
+    envVars:
+      - key: PORT
+        value: "8501"
+      - key: OPENAI_API_KEY
+        value: ""
