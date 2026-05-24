@@ -14,9 +14,10 @@ For very large scale (> 10M docs): consider Qdrant, Milvus, or Weaviate.
 
 import os
 import pickle
+import hashlib
 import numpy as np
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional, Dict, Any, Set
 from dataclasses import dataclass
 from loguru import logger
 
@@ -54,6 +55,7 @@ class FAISSVectorStore:
         self.index_type = index_type
         self.index = self._create_index(index_type, embedding_dim)
         self.documents: List[Document] = []
+        self._content_hashes: Set[str] = set()
 
     def _create_index(self, index_type: str, dim: int):
         if index_type == "flat":
@@ -71,6 +73,7 @@ class FAISSVectorStore:
     def add_documents(self, documents: List[Document], embeddings: np.ndarray):
         """
         Add documents and their embeddings to the store.
+        Duplicate content (same page_content hash) is silently skipped.
         
         Args:
             documents:  List of Document objects
@@ -80,13 +83,31 @@ class FAISSVectorStore:
             f"Mismatch: {len(documents)} docs vs {len(embeddings)} embeddings"
         assert embeddings.dtype == np.float32, "Embeddings must be float32"
 
+        unique_docs, unique_embs = [], []
+        n_skipped = 0
+        for doc, emb in zip(documents, embeddings):
+            h = hashlib.md5(doc.page_content.encode("utf-8")).hexdigest()
+            if h in self._content_hashes:
+                n_skipped += 1
+                continue
+            self._content_hashes.add(h)
+            unique_docs.append(doc)
+            unique_embs.append(emb)
+
+        if not unique_docs:
+            logger.info(f"All {len(documents)} documents were duplicates. Skipped.")
+            return
+
         if self.index_type == "ivf" and not self.index.is_trained:
             logger.info("Training IVF index...")
-            self.index.train(embeddings)
+            self.index.train(np.array(unique_embs))
 
-        self.index.add(embeddings)
-        self.documents.extend(documents)
-        logger.info(f"Added {len(documents)} documents. Total: {len(self.documents)}")
+        self.index.add(np.array(unique_embs))
+        self.documents.extend(unique_docs)
+        msg = f"Added {len(unique_docs)} documents. Total: {len(self.documents)}"
+        if n_skipped:
+            msg += f" ({n_skipped} duplicates skipped)"
+        logger.info(msg)
 
     def search(
         self,
@@ -125,7 +146,7 @@ class FAISSVectorStore:
         self.faiss.write_index(self.index, str(save_path / "index.faiss"))
 
         with open(save_path / "documents.pkl", "wb") as f:
-            pickle.dump(self.documents, f)
+            pickle.dump({"documents": self.documents, "hashes": self._content_hashes}, f)
 
         logger.info(f"Vector store saved to {save_path} ({len(self.documents)} docs)")
 
@@ -141,7 +162,14 @@ class FAISSVectorStore:
         index = faiss.read_index(str(load_path / "index.faiss"))
 
         with open(load_path / "documents.pkl", "rb") as f:
-            documents = pickle.load(f)
+            data = pickle.load(f)
+
+        if isinstance(data, dict):
+            documents = data["documents"]
+            hashes = data["hashes"]
+        else:
+            documents = data
+            hashes = {hashlib.md5(d.page_content.encode("utf-8")).hexdigest() for d in documents}
 
         store = cls.__new__(cls)
         store.faiss = faiss
@@ -149,6 +177,7 @@ class FAISSVectorStore:
         store.index_type = "loaded"
         store.index = index
         store.documents = documents
+        store._content_hashes = hashes
 
         logger.info(f"Vector store loaded from {load_path} ({len(documents)} docs)")
         return store
