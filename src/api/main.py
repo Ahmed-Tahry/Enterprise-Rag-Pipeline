@@ -15,6 +15,7 @@ Endpoints:
 import os
 import time
 import tempfile
+import asyncio
 import threading
 from pathlib import Path
 from typing import List, Optional
@@ -160,12 +161,12 @@ app.add_middleware(
 # ── Endpoints ────────────────────────────────────────────────────────────
 
 @app.get("/health")
-def health():
+async def health():
     return {"status": "ok", "timestamp": time.time()}
 
 
 @app.get("/stats")
-def stats(app: FastAPI = Depends(lambda: None)):
+async def stats(app: FastAPI = Depends(lambda: None)):
     p = app.state.pipeline
     return {
         "documents_indexed": p["stats"]["documents_indexed"],
@@ -180,7 +181,7 @@ def stats(app: FastAPI = Depends(lambda: None)):
 
 
 @app.post("/ingest", response_model=IngestResponse)
-def ingest_documents(files: List[UploadFile] = File(...), app: FastAPI = Depends(lambda: None)):
+async def ingest_documents(files: List[UploadFile] = File(...), app: FastAPI = Depends(lambda: None)):
     """
     Upload and index one or more documents.
     
@@ -203,8 +204,9 @@ def ingest_documents(files: List[UploadFile] = File(...), app: FastAPI = Depends
                 raise HTTPException(400, f"Invalid filename: {upload.filename}")
 
             tmp_path = Path(tmpdir) / safe_name
+            content = await upload.read()
             with open(tmp_path, "wb") as f:
-                f.write(upload.file.read())
+                f.write(content)
 
             try:
                 docs   = p["loader"].load(str(tmp_path))
@@ -219,14 +221,16 @@ def ingest_documents(files: List[UploadFile] = File(...), app: FastAPI = Depends
     if not all_chunks:
         raise HTTPException(400, "No text could be extracted from the uploaded files.")
 
-    # Embed and index
-    texts      = [c.page_content for c in all_chunks]
-    embeddings = p["embedder"].embed_documents(texts)
+    texts = [c.page_content for c in all_chunks]
+    embeddings = await asyncio.to_thread(p["embedder"].embed_documents, texts)
 
-    with p["_lock"]:
-        p["vector_store"].add_documents(all_chunks, embeddings)
-        p["bm25"].fit(p["vector_store"].documents)
-        p["stats"]["documents_indexed"] += n_files
+    def _index():
+        with p["_lock"]:
+            p["vector_store"].add_documents(all_chunks, embeddings)
+            p["bm25"].fit(p["vector_store"].documents)
+            p["stats"]["documents_indexed"] += n_files
+
+    await asyncio.to_thread(_index)
 
     latency_ms = (time.perf_counter() - t0) * 1000
 
@@ -239,7 +243,7 @@ def ingest_documents(files: List[UploadFile] = File(...), app: FastAPI = Depends
 
 
 @app.post("/query", response_model=QueryResponse)
-def query(request: QueryRequest, app: FastAPI = Depends(lambda: None)):
+async def query(request: QueryRequest, app: FastAPI = Depends(lambda: None)):
     """
     Query the RAG pipeline.
     
@@ -247,25 +251,30 @@ def query(request: QueryRequest, app: FastAPI = Depends(lambda: None)):
     """
     p = app.state.pipeline
 
-    with p["_lock"]:
-        if len(p["vector_store"]) == 0:
-            raise HTTPException(400, "No documents indexed yet. Use POST /ingest first.")
+    if len(p["vector_store"]) == 0:
+        raise HTTPException(400, "No documents indexed yet. Use POST /ingest first.")
 
-        response = p["rag_chain"].query(request.question, top_k=request.top_k)
+    def _do_query():
+        with p["_lock"]:
+            response = p["rag_chain"].query(request.question, top_k=request.top_k)
 
-        hallucination_result = None
-        if request.detect_hallucination and response.retrieved_chunks:
-            contexts = [r.document.page_content for r in response.retrieved_chunks]
-            h_result = p["halluc_detector"].detect(response.answer, contexts)
-            hallucination_result = {
-                "risk_level":        h_result.risk_level,
-                "faithfulness_score": round(h_result.faithfulness_score, 3),
-                "is_hallucination":  h_result.is_hallucination,
-                "flagged_claims":    h_result.flagged_claims[:3],
-            }
+            hallucination_result = None
+            if request.detect_hallucination and response.retrieved_chunks:
+                contexts = [r.document.page_content for r in response.retrieved_chunks]
+                h_result = p["halluc_detector"].detect(response.answer, contexts)
+                hallucination_result = {
+                    "risk_level":        h_result.risk_level,
+                    "faithfulness_score": round(h_result.faithfulness_score, 3),
+                    "is_hallucination":  h_result.is_hallucination,
+                    "flagged_claims":    h_result.flagged_claims[:3],
+                }
 
-        p["stats"]["queries_handled"]  += 1
-        p["stats"]["total_latency_ms"] += response.latency_ms
+            p["stats"]["queries_handled"]  += 1
+            p["stats"]["total_latency_ms"] += response.latency_ms
+
+        return response, hallucination_result
+
+    response, hallucination_result = await asyncio.to_thread(_do_query)
 
     return QueryResponse(
         question      = response.query,
@@ -279,32 +288,33 @@ def query(request: QueryRequest, app: FastAPI = Depends(lambda: None)):
 
 
 @app.post("/evaluate")
-def evaluate(request: EvalRequest, background_tasks: BackgroundTasks, app: FastAPI = Depends(lambda: None)):
+async def evaluate(request: EvalRequest, app: FastAPI = Depends(lambda: None)):
     """
     Run RAGAS evaluation on a test set.
     Results saved to data/eval_report.json.
     """
     p = app.state.pipeline
 
-    with p["_lock"]:
-        if len(p["vector_store"]) == 0:
-            raise HTTPException(400, "No documents indexed. Ingest documents first.")
+    if len(p["vector_store"]) == 0:
+        raise HTTPException(400, "No documents indexed. Ingest documents first.")
 
     if len(request.questions) > 100:
         raise HTTPException(400, "Max 100 questions per evaluation run.")
 
-    report = p["evaluator"].evaluate_dataset(
-        rag_chain     = p["rag_chain"],
-        questions     = request.questions,
-        ground_truths = request.ground_truths,
-        save_path     = "data/eval_report.json",
-    )
+    def _evaluate():
+        return p["evaluator"].evaluate_dataset(
+            rag_chain     = p["rag_chain"],
+            questions     = request.questions,
+            ground_truths = request.ground_truths,
+            save_path     = "data/eval_report.json",
+        )
 
+    report = await asyncio.to_thread(_evaluate)
     return report.to_dict()
 
 
 @app.delete("/index")
-def clear_index(app: FastAPI = Depends(lambda: None)):
+async def clear_index(app: FastAPI = Depends(lambda: None)):
     """Clear the vector store and BM25 index."""
     from src.retrieval.vector_store import FAISSVectorStore
     from src.retrieval.hybrid_retriever import BM25Retriever
