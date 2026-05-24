@@ -29,6 +29,19 @@ from werkzeug.utils import secure_filename
 
 # ── Pipeline stored in app.state (thread-safe via FastAPI lifecycle) ─────
 
+REQUIRED_ENV_VARS = ["OPENAI_API_KEY"]
+
+def validate_env():
+    """Check required env vars at startup. Fail fast with a clear message."""
+    missing = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
+    if missing:
+        logger.error(
+            f"Missing required environment variables: {missing}. "
+            f"Create a .env file from .env.example and add your API keys."
+        )
+        raise SystemExit(f"Missing required env vars: {missing}")
+
+
 def init_pipeline():
     """Initialise pipeline components."""
     from src.ingestion.embedder import get_embedder
@@ -137,7 +150,11 @@ class IngestResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting Enterprise RAG API...")
+    validate_env()
     app.state.pipeline = init_pipeline()
+    n_docs = app.state.pipeline["stats"]["documents_indexed"]
+    n_chunks = len(app.state.pipeline["vector_store"])
+    logger.info(f"Pipeline ready. Documents: {n_docs}, Chunks in index: {n_chunks}")
     yield
     logger.info("Shutting down.")
 
@@ -190,6 +207,9 @@ async def ingest_documents(files: List[UploadFile] = File(...), app: FastAPI = D
     p   = app.state.pipeline
     t0  = time.perf_counter()
 
+    filenames = [f.filename for f in files]
+    logger.info(f"Ingesting {len(files)} files: {filenames}")
+
     all_chunks = []
     n_files    = 0
 
@@ -197,10 +217,12 @@ async def ingest_documents(files: List[UploadFile] = File(...), app: FastAPI = D
         for upload in files:
             suffix = Path(upload.filename).suffix.lower()
             if suffix not in [".pdf", ".docx", ".doc", ".html", ".htm", ".txt", ".md"]:
+                logger.warning(f"Unsupported file type skipped: {upload.filename} ({suffix})")
                 raise HTTPException(400, f"Unsupported file type: {suffix}")
 
             safe_name = secure_filename(upload.filename)
             if not safe_name:
+                logger.warning(f"Invalid filename rejected: {upload.filename}")
                 raise HTTPException(400, f"Invalid filename: {upload.filename}")
 
             tmp_path = Path(tmpdir) / safe_name
@@ -252,7 +274,10 @@ async def query(request: QueryRequest, app: FastAPI = Depends(lambda: None)):
     p = app.state.pipeline
 
     if len(p["vector_store"]) == 0:
+        logger.warning(f"Query rejected (empty index): '{request.question[:80]}'")
         raise HTTPException(400, "No documents indexed yet. Use POST /ingest first.")
+
+    logger.info(f"Query: '{request.question[:120]}' | top_k={request.top_k}")
 
     def _do_query():
         with p["_lock"]:
@@ -296,10 +321,14 @@ async def evaluate(request: EvalRequest, app: FastAPI = Depends(lambda: None)):
     p = app.state.pipeline
 
     if len(p["vector_store"]) == 0:
+        logger.warning("Evaluate rejected (empty index)")
         raise HTTPException(400, "No documents indexed. Ingest documents first.")
 
     if len(request.questions) > 100:
+        logger.warning(f"Evaluate rejected: {len(request.questions)} questions exceeds max 100")
         raise HTTPException(400, "Max 100 questions per evaluation run.")
+
+    logger.info(f"Evaluating {len(request.questions)} questions")
 
     def _evaluate():
         return p["evaluator"].evaluate_dataset(
@@ -323,11 +352,12 @@ async def clear_index(app: FastAPI = Depends(lambda: None)):
     dim = p["embedder"].dimension
 
     with p["_lock"]:
+        was_docs = len(p["vector_store"])
         p["vector_store"] = FAISSVectorStore(dim)
         p["bm25"]         = BM25Retriever()
         p["retriever"].vector_store = p["vector_store"]
         p["retriever"].bm25         = p["bm25"]
         p["stats"]["documents_indexed"] = 0
 
-    logger.info("Index cleared.")
-    return {"status": "cleared"}
+    logger.info(f"Index cleared ({was_docs} chunks removed).")
+    return {"status": "cleared", "chunks_removed": was_docs}
