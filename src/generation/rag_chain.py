@@ -214,11 +214,15 @@ class GeminiLLM:
             json=self._build_body(system, user),
             timeout=60,
         )
-        response.raise_for_status()
         data = response.json()
+        error = data.get("error")
+        if error:
+            logger.error(f"Gemini API error: {error.get('message', error)}")
+            raise Exception(f"Gemini API error: {error.get('message', error)}")
         candidates = data.get("candidates", [])
         if not candidates:
-            return ""
+            logger.error(f"Gemini returned empty candidates. Response: {data}")
+            raise Exception("Gemini returned no candidates — check your model name and API key.")
         parts = candidates[0].get("content", {}).get("parts", [])
         return "".join(p.get("text", "") for p in parts).strip()
 
@@ -235,6 +239,10 @@ class GeminiLLM:
                     continue
                 try:
                     data = json.loads(line[6:])
+                    error = data.get("error")
+                    if error:
+                        logger.error(f"Gemini streaming error: {error.get('message', error)}")
+                        raise Exception(f"Gemini API error: {error.get('message', error)}")
                     for candidate in data.get("candidates", []):
                         parts = candidate.get("content", {}).get("parts", [])
                         for part in parts:
