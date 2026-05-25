@@ -172,6 +172,79 @@ class AnthropicLLM:
                 yield text
 
 
+class GeminiLLM:
+    BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+
+    def __init__(
+        self,
+        model: str = "gemini-2.0-flash-lite",
+        api_key: Optional[str] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+    ):
+        import httpx
+        self.http = httpx
+        self.api_key = api_key or os.environ["GOOGLE_API_KEY"]
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+
+    def _build_body(self, system: str, user: str) -> dict:
+        return {
+            "system_instruction": {
+                "parts": [{"text": system}]
+            },
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": user}],
+                }
+            ],
+            "generationConfig": {
+                "temperature": self.temperature,
+                "maxOutputTokens": self.max_tokens,
+            },
+        }
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
+    def generate(self, system: str, user: str) -> str:
+        response = self.http.post(
+            f"{self.BASE_URL}/{self.model}:generateContent",
+            headers={"x-goog-api-key": self.api_key},
+            json=self._build_body(system, user),
+            timeout=60,
+        )
+        response.raise_for_status()
+        data = response.json()
+        candidates = data.get("candidates", [])
+        if not candidates:
+            return ""
+        parts = candidates[0].get("content", {}).get("parts", [])
+        return "".join(p.get("text", "") for p in parts).strip()
+
+    def generate_stream(self, system: str, user: str):
+        with self.http.stream(
+            "POST",
+            f"{self.BASE_URL}/{self.model}:streamGenerateContent?alt=sse",
+            headers={"x-goog-api-key": self.api_key},
+            json=self._build_body(system, user),
+            timeout=120,
+        ) as resp:
+            for line in resp.iter_lines():
+                if not line.startswith("data: "):
+                    continue
+                try:
+                    data = json.loads(line[6:])
+                    for candidate in data.get("candidates", []):
+                        parts = candidate.get("content", {}).get("parts", [])
+                        for part in parts:
+                            text = part.get("text", "")
+                            if text:
+                                yield text
+                except json.JSONDecodeError:
+                    continue
+
+
 # ---------------------------------------------------------------------------
 # RAG Chain
 # ---------------------------------------------------------------------------

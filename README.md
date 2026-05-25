@@ -39,7 +39,7 @@ flowchart TB
 ## Quickstart
 
 ```bash
-cp .env.example .env   # add OPENAI_API_KEY
+cp .env.example .env   # add GOOGLE_API_KEY
 make install            # pip install -r requirements.txt
 make ingest             # index ./data/sample_docs -> ./data/vectorstore
 make run-api            # uvicorn at :8000
@@ -134,7 +134,7 @@ data/            sample_docs/, vectorstore/
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OPENAI_API_KEY` | — | Required for GPT-4o-mini |
+| `GOOGLE_API_KEY` | — | Required for Gemini |
 | `EMBEDDING_PROVIDER` | `huggingface` | `huggingface` or `openai` |
 | `EMBEDDING_MODEL` | `BAAI/bge-base-en-v1.5` | Local embedding model |
 | `LLM_MODEL` | `gpt-4o-mini` | Generation model |

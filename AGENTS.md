@@ -39,7 +39,7 @@ Single-package Python project (no `pyproject.toml`). Packages under `src/`:
 ## Framework quirks
 
 - **Path hack**: `scripts/ingest.py` and `tests/test_pipeline.py` both use `sys.path.insert(0, ...)` to add project root. Do not move them.
-- **`.env` required**: `python-dotenv` loads `.env` automatically. Missing `OPENAI_API_KEY` will crash the API at `/query`.
+- **`.env` required**: `python-dotenv` loads `.env` automatically. Missing `GOOGLE_API_KEY` (or `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` depending on `LLM_PROVIDER`) will crash startup.
 - **Docker**: Single `Dockerfile` runs both API (background `uvicorn`) and UI (foreground Streamlit) via `render_start.sh`.
 - **Pipeline state**: Dict of components held in `app.state.pipeline` with `threading.Lock()` for thread safety. Never access component instances directly outside the lock.
 - **Vector store persistence**: `data/vectorstore/` — FAISS index + pickled documents. `.gitignore`d.
@@ -47,7 +47,7 @@ Single-package Python project (no `pyproject.toml`). Packages under `src/`:
 
 ## Config (all via `.env`)
 
-Key vars: `OPENAI_API_KEY`, `EMBEDDING_PROVIDER` (huggingface|openai), `LLM_MODEL` (default gpt-4o-mini), `CHUNK_SIZE` (512), `RETRIEVAL_TOP_K` (20), `RERANK_TOP_K` (5), `USE_HYBRID`, `USE_RERANKER`.
+Key vars: `GOOGLE_API_KEY`, `EMBEDDING_PROVIDER` (huggingface|openai), `LLM_MODEL` (default gemini-2.0-flash-lite), `CHUNK_SIZE` (512), `RETRIEVAL_TOP_K` (20), `RERANK_TOP_K` (5), `USE_HYBRID`, `USE_RERANKER`.
 
 ## Style
 

@@ -31,17 +31,22 @@ from werkzeug.utils import secure_filename
 
 # ── Pipeline stored in app.state (thread-safe via FastAPI lifecycle) ─────
 
-REQUIRED_ENV_VARS = ["OPENAI_API_KEY"]
+PROVIDER_KEY_MAP = {
+    "gemini":   "GOOGLE_API_KEY",
+    "openai":   "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+}
 
 def validate_env():
     """Check required env vars at startup. Fail fast with a clear message."""
-    missing = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
-    if missing:
+    provider = os.getenv("LLM_PROVIDER", "gemini")
+    required_key = PROVIDER_KEY_MAP.get(provider, "GOOGLE_API_KEY")
+    if not os.getenv(required_key):
         logger.error(
-            f"Missing required environment variables: {missing}. "
-            f"Create a .env file from .env.example and add your API keys."
+            f"Missing {required_key} for LLM_PROVIDER={provider}. "
+            f"Set it in your .env file."
         )
-        raise SystemExit(f"Missing required env vars: {missing}")
+        raise SystemExit(f"Missing {required_key}")
 
 
 def init_pipeline():
@@ -83,11 +88,22 @@ def init_pipeline():
         reranker     = reranker,
     )
 
-    llm = OpenAILLM(
-        model       = os.getenv("LLM_MODEL", "gpt-4o-mini"),
-        temperature = float(os.getenv("LLM_TEMPERATURE", 0.0)),
-        max_tokens  = int(os.getenv("LLM_MAX_TOKENS", 1024)),
-    )
+    llm_provider = os.getenv("LLM_PROVIDER", "gemini")
+    llm_model    = os.getenv("LLM_MODEL", "gemini-2.0-flash-lite")
+    llm_kwargs   = {
+        "model":       llm_model,
+        "temperature": float(os.getenv("LLM_TEMPERATURE", 0.0)),
+        "max_tokens":  int(os.getenv("LLM_MAX_TOKENS", 1024)),
+    }
+    if llm_provider == "openai":
+        from src.generation.rag_chain import OpenAILLM
+        llm = OpenAILLM(**llm_kwargs)
+    elif llm_provider == "anthropic":
+        from src.generation.rag_chain import AnthropicLLM
+        llm = AnthropicLLM(**llm_kwargs)
+    else:
+        from src.generation.rag_chain import GeminiLLM
+        llm = GeminiLLM(**llm_kwargs)
 
     rag_chain     = RAGChain(retriever=retriever, llm=llm)
     evaluator     = RAGASEvaluator(embedder)
