@@ -20,7 +20,8 @@ import time
 import tempfile
 import asyncio
 import threading
-
+import pickle
+import shutil
 
 from pathlib import Path
 from typing import List, Optional
@@ -32,6 +33,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from loguru import logger
 from werkzeug.utils import secure_filename
+
+from src.generation.chat_history import ChatHistory
+
+MAX_CHAT_HISTORIES = 1000
 
 # ── Pipeline stored in app.state (thread-safe via FastAPI lifecycle) ─────
 load_dotenv()
@@ -64,6 +69,8 @@ def init_pipeline():
         CrossEncoderReranker,
     )
     from src.generation.rag_chain import RAGChain, OpenAILLM
+    from src.generation.query_rewriter import QueryRewriter
+    from src.generation.context_compressor import ContextCompressor
     from src.evaluation.ragas_eval import RAGASEvaluator
     from src.evaluation.hallucination_detector import EmbeddingHallucinationDetector
     from src.ingestion.document_loader import DocumentLoader
@@ -79,8 +86,24 @@ def init_pipeline():
         chunk_overlap=int(os.getenv("CHUNK_OVERLAP", 64)),
     )
 
-    vector_store = FAISSVectorStore(embedding_dim=embedder.dimension)
-    bm25 = BM25Retriever()
+    vector_store_path = os.getenv("VECTOR_STORE_PATH", "./data/vectorstore")
+    store_path_obj = Path(vector_store_path)
+
+    if store_path_obj.exists():
+        logger.info(f"Loading existing vector store from {vector_store_path}")
+        vector_store = FAISSVectorStore.load(vector_store_path, embedder.dimension)
+        bm25_path = store_path_obj / "bm25.pkl"
+        if bm25_path.exists():
+            with open(bm25_path, "rb") as f:
+                bm25 = pickle.load(f)
+            logger.info(f"BM25 loaded ({len(bm25.documents)} docs)")
+        else:
+            bm25 = BM25Retriever()
+            logger.warning("No BM25 pickle found, starting fresh BM25")
+    else:
+        logger.info("No existing vector store found, starting fresh")
+        vector_store = FAISSVectorStore(embedding_dim=embedder.dimension)
+        bm25 = BM25Retriever()
 
     use_reranker = os.getenv("USE_RERANKER", "true").lower() == "true"
     reranker = None
@@ -119,7 +142,15 @@ def init_pipeline():
 
         llm = GeminiLLM(**llm_kwargs)
 
-    rag_chain = RAGChain(retriever=retriever, llm=llm)
+    query_rewriter = QueryRewriter(llm=llm)
+    context_compressor = ContextCompressor(embedder=embedder)
+    rag_chain = RAGChain(
+        retriever=retriever,
+        llm=llm,
+        query_rewriter=query_rewriter,
+        context_compressor=context_compressor,
+        structured_output=True,
+    )
     evaluator = RAGASEvaluator(embedder)
     halluc_detector = EmbeddingHallucinationDetector(embedder)
 
@@ -133,12 +164,15 @@ def init_pipeline():
         "halluc_detector": halluc_detector,
         "loader": DocumentLoader(),
         "chunker": RecursiveCharacterChunker(chunk_cfg),
+        "vector_store_path": vector_store_path,
+        "loaded_from_disk": store_path_obj.exists(),
         "stats": {
             "documents_indexed": 0,
             "queries_handled": 0,
             "total_latency_ms": 0.0,
             "indexed_files": [],
         },
+        "chat_histories": {},
         "_lock": threading.Lock(),
     }
 
@@ -157,6 +191,9 @@ class QueryRequest(BaseModel):
     )
     top_k: int = Field(5, ge=1, le=20, description="Number of chunks to retrieve")
     detect_hallucination: bool = Field(True, description="Run hallucination detection")
+    conversation_id: Optional[str] = Field(
+        None, description="Conversation ID for multi-turn memory"
+    )
 
 
 class QueryResponse(BaseModel):
@@ -167,6 +204,7 @@ class QueryResponse(BaseModel):
     latency_ms: float
     model: str
     hallucination: Optional[dict] = None
+    confidence: Optional[float] = None
 
 
 class EvalRequest(BaseModel):
@@ -206,6 +244,11 @@ async def lifespan(app: FastAPI):
     app.state.pipeline = init_pipeline()
     n_docs = app.state.pipeline["stats"]["documents_indexed"]
     n_chunks = len(app.state.pipeline["vector_store"])
+    loaded = app.state.pipeline.get("loaded_from_disk", False)
+    if loaded:
+        logger.info(
+            f"Loaded persisted state from {app.state.pipeline['vector_store_path']}"
+        )
     logger.info(f"Pipeline ready. Documents: {n_docs}, Chunks in index: {n_chunks}")
     yield
     logger.info("Shutting down.")
@@ -247,6 +290,7 @@ async def stats(req: Request):
         ),
         "embedding_model": os.getenv("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5"),
         "llm_model": os.getenv("LLM_MODEL", "gpt-4o-mini"),
+        "vector_store_path": p.get("vector_store_path", "./data/vectorstore"),
     }
 
 
@@ -337,14 +381,18 @@ async def ingest_documents(
     texts = [c.page_content for c in all_chunks]
     embeddings = await asyncio.to_thread(p["embedder"].embed_documents, texts)
 
-    def _index():
+    def _index_and_save():
         with p["_lock"]:
             p["vector_store"].add_documents(all_chunks, embeddings)
             p["bm25"].fit(p["vector_store"].documents)
             p["stats"]["documents_indexed"] += n_files
             p["stats"]["indexed_files"].extend(file_entries)
+            store_path = p["vector_store_path"]
+            p["vector_store"].save(store_path)
+            with open(Path(store_path) / "bm25.pkl", "wb") as f:
+                pickle.dump(p["bm25"], f)
 
-    await asyncio.to_thread(_index)
+    await asyncio.to_thread(_index_and_save)
 
     latency_ms = (time.perf_counter() - t0) * 1000
 
@@ -365,6 +413,7 @@ async def query(req: Request, body: QueryRequest):
     Query the RAG pipeline.
 
     Returns the answer, cited sources, and optionally a hallucination check.
+    Supports multi-turn conversation via conversation_id.
     """
     p = get_pipeline(req)
 
@@ -376,7 +425,23 @@ async def query(req: Request, body: QueryRequest):
 
     def _do_query():
         with p["_lock"]:
-            response = p["rag_chain"].query(body.question, top_k=body.top_k)
+            chat_history = None
+            if body.conversation_id:
+                histories = p["chat_histories"]
+                if body.conversation_id not in histories:
+                    if len(histories) >= MAX_CHAT_HISTORIES:
+                        histories.pop(next(iter(histories)))
+                    histories[body.conversation_id] = ChatHistory()
+                chat_history = histories[body.conversation_id]
+
+            response = p["rag_chain"].query(
+                body.question, top_k=body.top_k, chat_history=chat_history
+            )
+
+            if body.conversation_id and response.has_answer:
+                p["chat_histories"][body.conversation_id].add_turn(
+                    body.question, response.answer
+                )
 
             hallucination_result = None
             if body.detect_hallucination and response.retrieved_chunks:
@@ -404,6 +469,7 @@ async def query(req: Request, body: QueryRequest):
         latency_ms=round(response.latency_ms, 1),
         model=response.model,
         hallucination=hallucination_result,
+        confidence=response.confidence,
     )
 
 
@@ -425,9 +491,21 @@ async def query_stream(req: Request, body: QueryRequest):
     logger.info(f"Streaming query: '{body.question[:120]}' | top_k={body.top_k}")
 
     async def event_stream():
+        with p["_lock"]:
+            chat_history = None
+            if body.conversation_id:
+                histories = p["chat_histories"]
+                if body.conversation_id not in histories:
+                    if len(histories) >= MAX_CHAT_HISTORIES:
+                        histories.pop(next(iter(histories)))
+                    histories[body.conversation_id] = ChatHistory()
+                chat_history = histories[body.conversation_id]
+
         def _collect():
             return list(
-                p["rag_chain"].query_stream(body.question, top_k=body.top_k)
+                p["rag_chain"].query_stream(
+                    body.question, top_k=body.top_k, chat_history=chat_history
+                )
             )
 
         try:
@@ -436,14 +514,18 @@ async def query_stream(req: Request, body: QueryRequest):
             yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
             return
 
+        answer = ""
         for event in events:
+            if event["type"] == "token":
+                answer += event["content"]
             yield f"data: {json.dumps(event)}\n\n"
 
-        def _update_stats():
-            with p["_lock"]:
-                p["stats"]["queries_handled"] += 1
-
-        await asyncio.to_thread(_update_stats)
+        with p["_lock"]:
+            if body.conversation_id and answer:
+                p["chat_histories"][body.conversation_id].add_turn(
+                    body.question, answer
+                )
+            p["stats"]["queries_handled"] += 1
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -489,8 +571,14 @@ async def clear_index(req: Request):
     p = get_pipeline(req)
     dim = p["embedder"].dimension
 
+    was_docs = len(p["vector_store"])
+
+    store_path = Path(p["vector_store_path"])
+    if store_path.exists():
+        shutil.rmtree(store_path)
+        logger.info(f"Deleted persisted store at {store_path}")
+
     with p["_lock"]:
-        was_docs = len(p["vector_store"])
         p["vector_store"] = FAISSVectorStore(dim)
         p["bm25"] = BM25Retriever()
         p["retriever"].vector_store = p["vector_store"]

@@ -16,7 +16,7 @@ Strategies implemented:
 
 import re
 from typing import List, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from src.ingestion.document_loader import Document
 from loguru import logger
 
@@ -25,8 +25,8 @@ from loguru import logger
 class ChunkConfig:
     chunk_size: int = 512
     chunk_overlap: int = 64
-    min_chunk_size: int = 50       # Discard chunks smaller than this
-    add_start_index: bool = True   # Track where chunk starts in original doc
+    min_chunk_size: int = 50  # Discard chunks smaller than this
+    add_start_index: bool = True  # Track where chunk starts in original doc
 
 
 class RecursiveCharacterChunker:
@@ -72,8 +72,10 @@ class RecursiveCharacterChunker:
 
         # Re-attach separator to splits (keep punctuation with sentence)
         if separator in {". ", "? ", "! "}:
-            splits = [s + separator if i < len(splits) - 1 else s
-                      for i, s in enumerate(splits)]
+            splits = [
+                s + separator if i < len(splits) - 1 else s
+                for i, s in enumerate(splits)
+            ]
 
         good_splits, final_chunks = [], []
 
@@ -159,10 +161,12 @@ class MarkdownChunker:
             if header_match:
                 # Save previous section
                 if current_content:
-                    sections.append({
-                        "headers": dict(current_headers),
-                        "content": "\n".join(current_content),
-                    })
+                    sections.append(
+                        {
+                            "headers": dict(current_headers),
+                            "content": "\n".join(current_content),
+                        }
+                    )
                     current_content = []
 
                 level = len(header_match.group(1))
@@ -176,10 +180,12 @@ class MarkdownChunker:
                 current_content.append(line)
 
         if current_content:
-            sections.append({
-                "headers": dict(current_headers),
-                "content": "\n".join(current_content),
-            })
+            sections.append(
+                {
+                    "headers": dict(current_headers),
+                    "content": "\n".join(current_content),
+                }
+            )
 
         chunks = []
         for section in sections:
@@ -194,7 +200,9 @@ class MarkdownChunker:
                 continue
 
             # Prepend breadcrumb to content for better retrieval
-            full_content = f"[Section: {breadcrumb}]\n\n{content}" if breadcrumb else content
+            full_content = (
+                f"[Section: {breadcrumb}]\n\n{content}" if breadcrumb else content
+            )
 
             # Further split if section is too large
             if len(full_content) > self.config.chunk_size:
@@ -237,7 +245,9 @@ class SemanticChunker:
 
     def split_documents(self, documents: List[Document]) -> List[Document]:
         if self.model is None:
-            logger.warning("No embedding model provided for SemanticChunker. Falling back to RecursiveCharacterChunker.")
+            logger.warning(
+                "No embedding model provided for SemanticChunker. Falling back to RecursiveCharacterChunker."
+            )
             return RecursiveCharacterChunker(self.config).split_documents(documents)
 
         chunks = []
@@ -261,14 +271,14 @@ class SemanticChunker:
 
         # Find cosine similarity between adjacent sentences
         similarities = [
-            float(embeddings[i] @ embeddings[i + 1])
-            for i in range(len(embeddings) - 1)
+            float(embeddings[i] @ embeddings[i + 1]) for i in range(len(embeddings) - 1)
         ]
 
         # Identify breakpoints: where similarity drops below threshold
         mean_sim = float(np.mean(similarities))
         breakpoints = [
-            i + 1 for i, sim in enumerate(similarities)
+            i + 1
+            for i, sim in enumerate(similarities)
             if sim < (mean_sim * self.threshold)
         ]
 
@@ -290,13 +300,17 @@ class SemanticChunker:
         return result
 
 
-def get_chunker(strategy: str = "recursive", config: Optional[ChunkConfig] = None, **kwargs):
+def get_chunker(
+    strategy: str = "recursive", config: Optional[ChunkConfig] = None, **kwargs
+):
     """Factory function to get a chunker by strategy name."""
     strategies = {
         "recursive": RecursiveCharacterChunker,
-        "markdown":  MarkdownChunker,
-        "semantic":  SemanticChunker,
+        "markdown": MarkdownChunker,
+        "semantic": SemanticChunker,
     }
     if strategy not in strategies:
-        raise ValueError(f"Unknown chunking strategy: '{strategy}'. Choose from: {list(strategies.keys())}")
+        raise ValueError(
+            f"Unknown chunking strategy: '{strategy}'. Choose from: {list(strategies.keys())}"
+        )
     return strategies[strategy](config=config, **kwargs)

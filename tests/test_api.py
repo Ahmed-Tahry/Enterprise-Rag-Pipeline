@@ -3,7 +3,12 @@ tests/test_api.py — FastAPI endpoint tests using TestClient.
 All tests local, no external services or API keys.
 """
 
-import sys, os, pytest, threading, numpy as np
+import sys
+import os
+import pytest
+import threading
+import numpy as np
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from fastapi.testclient import TestClient
@@ -11,7 +16,6 @@ from src.api.main import app
 from src.ingestion.document_loader import Document
 from src.retrieval.vector_store import FAISSVectorStore
 from src.retrieval.hybrid_retriever import BM25Retriever
-from src.generation.rag_chain import RAGChain
 
 
 class MockEmbedder:
@@ -42,17 +46,26 @@ class MockRetriever:
             metadata={"source": "test.txt", "filename": "test.txt", "chunk_index": 0},
         )
         from src.retrieval.vector_store import SearchResult
+
         return [SearchResult(document=doc, score=0.95, rank=1)]
 
 
 class MockRAGChain:
-    def query(self, question, top_k=5):
+    def query(self, question, top_k=5, **kwargs):
         from src.generation.rag_chain import RAGResponse
-        import time
+
         return RAGResponse(
             query=question,
             answer="This is a test answer based on the provided context. [Source 1]",
-            sources=[{"rank": 1, "filename": "test.txt", "score": 0.95, "cited": True, "excerpt": "Test document..."}],
+            sources=[
+                {
+                    "rank": 1,
+                    "filename": "test.txt",
+                    "score": 0.95,
+                    "cited": True,
+                    "excerpt": "Test document...",
+                }
+            ],
             retrieved_chunks=MockRetriever().search(question),
             latency_ms=10.0,
             model="mock-llm",
@@ -61,8 +74,11 @@ class MockRAGChain:
 
 
 class MockEvaluator:
-    def evaluate_dataset(self, rag_chain, questions, ground_truths=None, save_path=None):
+    def evaluate_dataset(
+        self, rag_chain, questions, ground_truths=None, save_path=None
+    ):
         from src.evaluation.ragas_eval import EvalReport
+
         return EvalReport(
             n_samples=len(questions),
             faithfulness=0.85,
@@ -78,6 +94,7 @@ class MockEvaluator:
 class MockHallucDetector:
     def detect(self, answer, contexts):
         from src.evaluation.hallucination_detector import HallucinationResult
+
         return HallucinationResult(
             is_hallucination=False,
             confidence=0.1,
@@ -102,17 +119,24 @@ def setup_pipeline():
     bm25.fit([doc])
 
     app.state.pipeline = {
-        "embedder":       MockEmbedder(),
-        "vector_store":   vs,
-        "bm25":           bm25,
-        "retriever":      MockRetriever(),
-        "rag_chain":      MockRAGChain(),
-        "evaluator":      MockEvaluator(),
+        "embedder": MockEmbedder(),
+        "vector_store": vs,
+        "bm25": bm25,
+        "retriever": MockRetriever(),
+        "rag_chain": MockRAGChain(),
+        "evaluator": MockEvaluator(),
         "halluc_detector": MockHallucDetector(),
-        "loader":         None,
-        "chunker":        None,
-        "stats":          {"documents_indexed": 1, "queries_handled": 0, "total_latency_ms": 0.0},
-        "_lock":          threading.Lock(),
+        "loader": None,
+        "chunker": None,
+        "vector_store_path": "/tmp/opencode/test_vectorstore",
+        "stats": {
+            "documents_indexed": 1,
+            "queries_handled": 0,
+            "total_latency_ms": 0.0,
+            "indexed_files": [],
+        },
+        "chat_histories": {},
+        "_lock": threading.Lock(),
     }
     yield
     app.state.pipeline = None
@@ -146,7 +170,10 @@ def test_query_basic():
 
 
 def test_query_no_hallucination():
-    resp = client.post("/query", json={"question": "What is the policy?", "detect_hallucination": False})
+    resp = client.post(
+        "/query",
+        json={"question": "What is the policy?", "detect_hallucination": False},
+    )
     assert resp.status_code == 200
     assert resp.json()["hallucination"] is None
 
@@ -165,7 +192,9 @@ def test_query_empty_index(setup_pipeline):
 
 
 def test_evaluate_basic():
-    resp = client.post("/evaluate", json={"questions": ["What is the policy?", "How does leave work?"]})
+    resp = client.post(
+        "/evaluate", json={"questions": ["What is the policy?", "How does leave work?"]}
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert data["n_samples"] == 2

@@ -18,7 +18,7 @@ RRF formula:
 import math
 import re
 from collections import defaultdict
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Optional
 from loguru import logger
 
 from src.ingestion.document_loader import Document
@@ -26,17 +26,43 @@ from src.retrieval.vector_store import FAISSVectorStore, SearchResult
 
 
 # ---------------------------------------------------------------------------
+# Standalone RRF utility (shared by retriever and RAGChain)
+# ---------------------------------------------------------------------------
+
+
+def reciprocal_rank_fusion(
+    result_lists: List[List[SearchResult]],
+    top_k: int,
+    rrf_k: int = 60,
+) -> List[SearchResult]:
+    """Combine multiple ranked lists using Reciprocal Rank Fusion."""
+    doc_scores: Dict[str, float] = defaultdict(float)
+    doc_map: Dict[str, Document] = {}
+    for results in result_lists:
+        for rank, result in enumerate(results, 1):
+            doc_id = result.document.page_content
+            doc_scores[doc_id] += 1.0 / (rrf_k + rank)
+            doc_map[doc_id] = result.document
+    sorted_ids = sorted(doc_scores, key=lambda x: doc_scores[x], reverse=True)[:top_k]
+    return [
+        SearchResult(document=doc_map[doc_id], score=doc_scores[doc_id], rank=rank + 1)
+        for rank, doc_id in enumerate(sorted_ids)
+    ]
+
+
+# ---------------------------------------------------------------------------
 # BM25 Retriever
 # ---------------------------------------------------------------------------
+
 
 class BM25Retriever:
     """
     BM25 sparse retrieval — the gold standard keyword-based retrieval.
-    
+
     BM25 advantages over TF-IDF:
       - Term saturation: repeated words have diminishing returns
       - Length normalisation: long docs aren't unfairly boosted
-    
+
     k1=1.5 (term saturation), b=0.75 (length normalisation) are
     empirically validated defaults across many benchmarks.
     """
@@ -88,12 +114,16 @@ class BM25Retriever:
                 if tf == 0:
                     continue
                 dl = len(tokens)
-                numerator   = tf * (self.k1 + 1)
-                denominator = tf + self.k1 * (1 - self.b + self.b * dl / self.avg_doc_len)
-                scores[i]  += idf * (numerator / denominator)
+                numerator = tf * (self.k1 + 1)
+                denominator = tf + self.k1 * (
+                    1 - self.b + self.b * dl / self.avg_doc_len
+                )
+                scores[i] += idf * (numerator / denominator)
 
         # Get top-k indices by score
-        top_indices = sorted(range(self.N), key=lambda i: scores[i], reverse=True)[:top_k]
+        top_indices = sorted(range(self.N), key=lambda i: scores[i], reverse=True)[
+            :top_k
+        ]
 
         return [
             SearchResult(document=self.documents[i], score=scores[i], rank=rank + 1)
@@ -103,30 +133,32 @@ class BM25Retriever:
 
     def _tokenise(self, text: str) -> List[str]:
         """Lowercase + alphanumeric tokenisation."""
-        return re.findall(r'\b[a-z0-9]+\b', text.lower())
+        return re.findall(r"\b[a-z0-9]+\b", text.lower())
 
 
 # ---------------------------------------------------------------------------
 # Cross-Encoder Reranker
 # ---------------------------------------------------------------------------
 
+
 class CrossEncoderReranker:
     """
     Cross-encoder reranker: takes (query, document) pairs and scores them jointly.
-    
+
     Why rerank?
     Bi-encoders (like sentence-transformers) encode query and document separately.
     This is fast but misses fine-grained interaction signals.
-    
+
     Cross-encoders read (query + document) together → much higher quality scores.
     Too slow to run on the full corpus → run on top-20 candidates from initial retrieval.
-    
+
     Classic 2-stage pipeline:
       Retrieval (top 20) → Reranker (top 5) → LLM
     """
 
     def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
         from sentence_transformers import CrossEncoder
+
         logger.info(f"Loading reranker: {model_name}")
         self.model = CrossEncoder(model_name)
         logger.info("Reranker loaded")
@@ -139,7 +171,7 @@ class CrossEncoderReranker:
     ) -> List[SearchResult]:
         """
         Re-score and rerank results using cross-encoder.
-        
+
         Returns top_k results sorted by reranker score (descending).
         """
         if not results:
@@ -168,10 +200,11 @@ class CrossEncoderReranker:
 # Hybrid Retriever (BM25 + Dense + RRF)
 # ---------------------------------------------------------------------------
 
+
 class HybridRetriever:
     """
     Combines BM25 and dense retrieval via Reciprocal Rank Fusion.
-    
+
     Pipeline:
       Query
         ├── BM25 → top_k results (ranked by BM25 score)
@@ -202,12 +235,12 @@ class HybridRetriever:
     ) -> List[SearchResult]:
         """
         Full hybrid retrieval pipeline.
-        
+
         Args:
             query:       Natural language query
             top_k:       Final number of results to return
             retrieval_k: Candidates retrieved before reranking
-        
+
         Returns:
             List of SearchResult, sorted by relevance.
         """
@@ -234,39 +267,46 @@ class HybridRetriever:
 
         return final_results
 
+    def search_multi(
+        self,
+        queries: List[str],
+        top_k: int = 5,
+        retrieval_k: int = 20,
+    ) -> List[SearchResult]:
+        """
+        Search with multiple queries and fuse results via RRF + single reranker pass.
+
+        Designed for query rewriting: each rewritten query densifies different
+        semantic aspects, BM25 runs per-query for lexical diversity, and a single
+        reranker pass at the end avoids unnecessary computation.
+        """
+        if len(queries) <= 1:
+            return self.search(
+                queries[0] if queries else "", top_k=top_k, retrieval_k=retrieval_k
+            )
+
+        all_results: List[List[SearchResult]] = []
+        for q in queries:
+            q_emb = self.embedder.embed_query(q)
+            dense = self.vector_store.search(q_emb, top_k=retrieval_k)
+            bm25 = self.bm25.search(q, top_k=retrieval_k)
+            fused = reciprocal_rank_fusion([dense, bm25], top_k=retrieval_k)
+            all_results.append(fused)
+
+        fused = reciprocal_rank_fusion(all_results, top_k=retrieval_k)
+
+        if self.reranker and fused:
+            final = self.reranker.rerank(queries[0], fused, top_k=top_k)
+        else:
+            final = fused[:top_k]
+            for rank, r in enumerate(final):
+                r.rank = rank + 1
+
+        return final
+
     def _reciprocal_rank_fusion(
         self,
         result_lists: List[List[SearchResult]],
         top_k: int,
     ) -> List[SearchResult]:
-        """
-        Combine multiple ranked lists using RRF.
-        
-        RRF score: Σ 1 / (k + rank_i) for each list i
-        k=60 prevents extreme scores for rank-1 documents.
-        """
-        # Map: document content hash → accumulated RRF score
-        doc_scores: Dict[str, float] = defaultdict(float)
-        doc_map: Dict[str, Document] = {}
-
-        for results in result_lists:
-            for result in results:
-                doc_id = self._doc_id(result.document)
-                doc_scores[doc_id] += 1.0 / (self.rrf_k + result.rank)
-                doc_map[doc_id] = result.document
-
-        # Sort by RRF score
-        sorted_ids = sorted(doc_scores, key=lambda x: doc_scores[x], reverse=True)[:top_k]
-
-        return [
-            SearchResult(
-                document=doc_map[doc_id],
-                score=doc_scores[doc_id],
-                rank=rank + 1,
-            )
-            for rank, doc_id in enumerate(sorted_ids)
-        ]
-
-    def _doc_id(self, doc: Document) -> str:
-        """Stable ID for a document chunk (source + chunk index)."""
-        return f"{doc.metadata.get('source','?')}::{doc.metadata.get('chunk_index', hash(doc.page_content))}"
+        return reciprocal_rank_fusion(result_lists, top_k, rrf_k=self.rrf_k)

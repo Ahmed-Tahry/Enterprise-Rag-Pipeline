@@ -16,7 +16,7 @@ LLM method in async quality monitoring (sampled 5% of requests).
 
 import re
 import numpy as np
-from typing import List, Tuple, Dict
+from typing import List
 from dataclasses import dataclass
 from loguru import logger
 
@@ -24,11 +24,12 @@ from loguru import logger
 @dataclass
 class HallucinationResult:
     """Result of hallucination detection on a single answer."""
-    is_hallucination:  bool
-    confidence:        float       # 0-1, probability of hallucination
-    method:            str
-    flagged_claims:    List[str]   # Specific sentences that look hallucinated
-    faithfulness_score: float      # Overall faithfulness (1 - hallucination risk)
+
+    is_hallucination: bool
+    confidence: float  # 0-1, probability of hallucination
+    method: str
+    flagged_claims: List[str]  # Specific sentences that look hallucinated
+    faithfulness_score: float  # Overall faithfulness (1 - hallucination risk)
 
     @property
     def risk_level(self) -> str:
@@ -51,14 +52,14 @@ class HallucinationResult:
 class EmbeddingHallucinationDetector:
     """
     Fast hallucination detection using embedding similarity.
-    
+
     Logic:
       1. Split answer into individual claims (sentences)
       2. Embed each claim and all context chunks
       3. For each claim, find max cosine similarity to any context chunk
       4. Claims with low similarity → potentially hallucinated
       5. Aggregate → faithfulness score
-    
+
     Threshold tuning:
       claim_threshold: min cosine similarity for a claim to be "grounded"
                        Typical: 0.45-0.60 depending on embedding model
@@ -71,11 +72,11 @@ class EmbeddingHallucinationDetector:
     def detect(self, answer: str, contexts: List[str]) -> HallucinationResult:
         """
         Detect hallucinations in an answer given the retrieved contexts.
-        
+
         Args:
             answer:   Generated answer text
             contexts: List of retrieved context strings
-        
+
         Returns:
             HallucinationResult with faithfulness score and flagged claims
         """
@@ -84,16 +85,16 @@ class EmbeddingHallucinationDetector:
 
         if not claims or not contexts:
             return HallucinationResult(
-                is_hallucination  = False,
-                confidence        = 0.0,
-                method            = "embedding",
-                flagged_claims    = [],
-                faithfulness_score = 1.0,
+                is_hallucination=False,
+                confidence=0.0,
+                method="embedding",
+                flagged_claims=[],
+                faithfulness_score=1.0,
             )
 
         # Embed
         claim_embs = self.embedder.embed_documents(claims)
-        ctx_embs   = self.embedder.embed_documents(contexts)
+        ctx_embs = self.embedder.embed_documents(contexts)
 
         # Score each claim
         claim_scores = []
@@ -106,24 +107,24 @@ class EmbeddingHallucinationDetector:
                 flagged_claims.append(claim)
 
         faithfulness_score = float(np.mean(claim_scores)) if claim_scores else 1.0
-        is_hallucination   = faithfulness_score < self.claim_threshold
+        is_hallucination = faithfulness_score < self.claim_threshold
 
         return HallucinationResult(
-            is_hallucination  = is_hallucination,
-            confidence        = max(0.0, 1.0 - faithfulness_score),
-            method            = "embedding",
-            flagged_claims    = flagged_claims,
-            faithfulness_score = faithfulness_score,
+            is_hallucination=is_hallucination,
+            confidence=max(0.0, 1.0 - faithfulness_score),
+            method="embedding",
+            flagged_claims=flagged_claims,
+            faithfulness_score=faithfulness_score,
         )
 
     def _extract_claims(self, text: str) -> List[str]:
         """Split text into individual factual claims."""
         # Split on sentence boundaries
-        sentences = re.split(r'(?<=[.!?])\s+', text)
+        sentences = re.split(r"(?<=[.!?])\s+", text)
         # Filter: skip citations like "[Source 1]" and short fragments
         claims = []
         for s in sentences:
-            clean = re.sub(r'\[Source \d+\]', '', s).strip()
+            clean = re.sub(r"\[Source \d+\]", "", s).strip()
             if len(clean) > 20:
                 claims.append(clean)
         return claims
@@ -132,10 +133,10 @@ class EmbeddingHallucinationDetector:
 class LLMHallucinationDetector:
     """
     LLM-based hallucination detection using Natural Language Inference.
-    
+
     More accurate than embedding-based but requires an LLM call.
     Use for: audit logging, quality sampling, high-stakes answers.
-    
+
     Method:
       For each claim in the answer, ask the LLM:
       "Is this claim directly supported by the provided context?"
@@ -163,8 +164,11 @@ REASON: <reason>"""
         claims = self._extract_claims(answer)
         if not claims or not contexts:
             return HallucinationResult(
-                is_hallucination=False, confidence=0.0,
-                method="llm_nli", flagged_claims=[], faithfulness_score=1.0,
+                is_hallucination=False,
+                confidence=0.0,
+                method="llm_nli",
+                flagged_claims=[],
+                faithfulness_score=1.0,
             )
 
         combined_context = "\n\n".join(contexts[:3])  # Use top 3 contexts
@@ -195,16 +199,20 @@ REASON: <reason>"""
         faithfulness = float(np.mean(scores)) if scores else 1.0
 
         return HallucinationResult(
-            is_hallucination  = faithfulness < 0.5,
-            confidence        = 1.0 - faithfulness,
-            method            = "llm_nli",
-            flagged_claims    = flagged,
-            faithfulness_score = faithfulness,
+            is_hallucination=faithfulness < 0.5,
+            confidence=1.0 - faithfulness,
+            method="llm_nli",
+            flagged_claims=flagged,
+            faithfulness_score=faithfulness,
         )
 
     def _extract_claims(self, text: str) -> List[str]:
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-        return [re.sub(r'\[Source \d+\]', '', s).strip() for s in sentences if len(s.strip()) > 20]
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        return [
+            re.sub(r"\[Source \d+\]", "", s).strip()
+            for s in sentences
+            if len(s.strip()) > 20
+        ]
 
     def _parse_verdict(self, response: str) -> str:
         for verdict in ["NOT_SUPPORTED", "PARTIALLY_SUPPORTED", "SUPPORTED"]:

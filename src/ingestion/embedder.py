@@ -17,14 +17,13 @@ import numpy as np
 from typing import List, Optional
 from loguru import logger
 from tqdm import tqdm
-from src.ingestion.document_loader import Document
 
 
 class HuggingFaceEmbedder:
     """
     Local embedding using sentence-transformers.
     Runs entirely on your hardware — no API costs.
-    
+
     Recommended models (MTEB leaderboard top performers):
       - BAAI/bge-base-en-v1.5    (768-dim, 109M params, fast)
       - BAAI/bge-large-en-v1.5   (1024-dim, 335M params, best quality)
@@ -33,6 +32,7 @@ class HuggingFaceEmbedder:
 
     def __init__(self, model_name: str = "BAAI/bge-base-en-v1.5", device: str = "cpu"):
         from sentence_transformers import SentenceTransformer
+
         logger.info(f"Loading embedding model: {model_name}")
         self.model = SentenceTransformer(model_name, device=device)
         self.model_name = model_name
@@ -69,10 +69,10 @@ class HuggingFaceEmbedder:
 class OpenAIEmbedder:
     """
     OpenAI embedding API.
-    
+
     text-embedding-3-small: 1536-dim, fast, cheap ($0.02/1M tokens)
     text-embedding-3-large: 3072-dim, best quality ($0.13/1M tokens)
-    
+
     Both support Matryoshka representation — you can truncate dimensions
     for faster retrieval with minor quality loss.
     """
@@ -84,6 +84,7 @@ class OpenAIEmbedder:
         dimensions: Optional[int] = None,
     ):
         from openai import OpenAI
+
         self.client = OpenAI(api_key=api_key or os.environ["OPENAI_API_KEY"])
         self.model = model
         self.dimensions = dimensions
@@ -95,7 +96,7 @@ class OpenAIEmbedder:
         all_embeddings = []
 
         for i in tqdm(range(0, len(texts), batch_size), desc="Embedding"):
-            batch = texts[i: i + batch_size]
+            batch = texts[i : i + batch_size]
             kwargs = {"input": batch, "model": self.model}
             if self.dimensions:
                 kwargs["dimensions"] = self.dimensions
@@ -121,15 +122,17 @@ class OpenAIEmbedder:
 def get_embedder(provider: str = "huggingface", **kwargs):
     """
     Factory: get an embedder by provider name.
-    
+
     Usage:
         embedder = get_embedder("huggingface", model_name="BAAI/bge-base-en-v1.5")
         embedder = get_embedder("openai", model="text-embedding-3-small")
     """
     providers = {
         "huggingface": HuggingFaceEmbedder,
-        "openai":      OpenAIEmbedder,
+        "openai": OpenAIEmbedder,
     }
     if provider not in providers:
-        raise ValueError(f"Unknown embedding provider: '{provider}'. Choose from: {list(providers.keys())}")
+        raise ValueError(
+            f"Unknown embedding provider: '{provider}'. Choose from: {list(providers.keys())}"
+        )
     return providers[provider](**kwargs)

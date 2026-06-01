@@ -7,14 +7,22 @@ tests/test_retrieval.py — Vector store and hybrid retrieval tests
 # tests/test_ingestion.py
 # ============================================================
 
-import sys, os, tempfile, pytest
+import sys
+import os
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.ingestion.document_loader import Document, TextLoader, DocumentLoader
-from src.ingestion.chunker import RecursiveCharacterChunker, ChunkConfig, MarkdownChunker
+from src.ingestion.chunker import (
+    RecursiveCharacterChunker,
+    ChunkConfig,
+    MarkdownChunker,
+)
 
 
 # ── TextLoader ───────────────────────────────────────────────────────────
+
 
 def test_text_loader_basic(tmp_path):
     f = tmp_path / "test.txt"
@@ -53,11 +61,13 @@ def test_document_loader_directory(tmp_path):
 
 # ── RecursiveCharacterChunker ─────────────────────────────────────────────
 
+
 def test_recursive_chunker_basic():
-    config  = ChunkConfig(chunk_size=100, chunk_overlap=20, min_chunk_size=10)
+    config = ChunkConfig(chunk_size=100, chunk_overlap=20, min_chunk_size=10)
     chunker = RecursiveCharacterChunker(config)
-    doc     = Document(
-        page_content="This is sentence one. This is sentence two. This is sentence three. " * 10,
+    doc = Document(
+        page_content="This is sentence one. This is sentence two. This is sentence three. "
+        * 10,
         metadata={"source": "test.txt"},
     )
     chunks = chunker.split_documents([doc])
@@ -67,9 +77,9 @@ def test_recursive_chunker_basic():
 
 
 def test_recursive_chunker_preserves_metadata():
-    config  = ChunkConfig(chunk_size=50, chunk_overlap=10)
+    config = ChunkConfig(chunk_size=50, chunk_overlap=10)
     chunker = RecursiveCharacterChunker(config)
-    doc     = Document(
+    doc = Document(
         page_content="Short text. " * 20,
         metadata={"source": "doc.pdf", "page": 3},
     )
@@ -81,10 +91,10 @@ def test_recursive_chunker_preserves_metadata():
 
 
 def test_recursive_chunker_overlap():
-    config  = ChunkConfig(chunk_size=80, chunk_overlap=30, min_chunk_size=10)
+    config = ChunkConfig(chunk_size=80, chunk_overlap=30, min_chunk_size=10)
     chunker = RecursiveCharacterChunker(config)
-    text    = "The quick brown fox. " * 15
-    chunks  = chunker.split_text(text)
+    text = "The quick brown fox. " * 15
+    chunks = chunker.split_text(text)
     # Adjacent chunks should share some content
     if len(chunks) > 1:
         last_words_of_first = set(chunks[0].split()[-3:])
@@ -106,10 +116,10 @@ Content of section two goes here with more text.
 ### Subsection 2.1
 Even deeper content here.
 """
-    config  = ChunkConfig(chunk_size=500, chunk_overlap=50)
+    config = ChunkConfig(chunk_size=500, chunk_overlap=50)
     chunker = MarkdownChunker(config)
-    doc     = Document(page_content=md_text, metadata={"source": "doc.md"})
-    chunks  = chunker.split_documents([doc])
+    doc = Document(page_content=md_text, metadata={"source": "doc.md"})
+    chunks = chunker.split_documents([doc])
     assert len(chunks) >= 2
     # Section paths should be in metadata
     for c in chunks:
@@ -117,10 +127,10 @@ Even deeper content here.
 
 
 def test_empty_document():
-    config  = ChunkConfig(chunk_size=100, chunk_overlap=20, min_chunk_size=10)
+    config = ChunkConfig(chunk_size=100, chunk_overlap=20, min_chunk_size=10)
     chunker = RecursiveCharacterChunker(config)
-    doc     = Document(page_content="   \n\n  ", metadata={})
-    chunks  = chunker.split_documents([doc])
+    doc = Document(page_content="   \n\n  ", metadata={})
+    chunks = chunker.split_documents([doc])
     assert chunks == []
 
 
@@ -129,7 +139,6 @@ def test_empty_document():
 # ============================================================
 
 import numpy as np
-from src.ingestion.document_loader import Document
 from src.retrieval.vector_store import FAISSVectorStore, SearchResult
 from src.retrieval.hybrid_retriever import BM25Retriever
 
@@ -145,28 +154,30 @@ def make_docs(n: int = 10) -> list:
     docs = []
     for i in range(n):
         topic = topics[i % len(topics)]
-        docs.append(Document(
-            page_content=f"Document {i}: {topic}. More details about {topic.split()[0]}.",
-            metadata={"source": f"doc_{i}.txt", "chunk_index": i},
-        ))
+        docs.append(
+            Document(
+                page_content=f"Document {i}: {topic}. More details about {topic.split()[0]}.",
+                metadata={"source": f"doc_{i}.txt", "chunk_index": i},
+            )
+        )
     return docs
 
 
 def test_faiss_add_and_search():
-    dim   = 32
+    dim = 32
     store = FAISSVectorStore(embedding_dim=dim)
-    docs  = make_docs(10)
-    embs  = np.random.randn(10, dim).astype(np.float32)
+    docs = make_docs(10)
+    embs = np.random.randn(10, dim).astype(np.float32)
     embs /= np.linalg.norm(embs, axis=1, keepdims=True)
     store.add_documents(docs, embs)
     assert len(store) == 10
 
 
 def test_faiss_search_returns_top_k():
-    dim   = 32
+    dim = 32
     store = FAISSVectorStore(embedding_dim=dim)
-    docs  = make_docs(20)
-    embs  = np.random.randn(20, dim).astype(np.float32)
+    docs = make_docs(20)
+    embs = np.random.randn(20, dim).astype(np.float32)
     embs /= np.linalg.norm(embs, axis=1, keepdims=True)
     store.add_documents(docs, embs)
     query = np.random.randn(dim).astype(np.float32)
@@ -180,10 +191,10 @@ def test_faiss_search_returns_top_k():
 
 
 def test_faiss_save_load(tmp_path):
-    dim   = 16
+    dim = 16
     store = FAISSVectorStore(embedding_dim=dim)
-    docs  = make_docs(5)
-    embs  = np.random.randn(5, dim).astype(np.float32)
+    docs = make_docs(5)
+    embs = np.random.randn(5, dim).astype(np.float32)
     embs /= np.linalg.norm(embs, axis=1, keepdims=True)
     store.add_documents(docs, embs)
     store.save(str(tmp_path / "vs"))
@@ -222,7 +233,6 @@ def test_bm25_unknown_term():
 # tests/test_hallucination.py — Hallucination detection tests
 # ============================================================
 
-import numpy as np
 from src.evaluation.hallucination_detector import (
     EmbeddingHallucinationDetector,
     LLMHallucinationDetector,
@@ -232,6 +242,7 @@ from src.evaluation.hallucination_detector import (
 
 class MockEmbedder:
     """Returns deterministic embeddings for testing."""
+
     dimension = 4
 
     def embed_documents(self, texts):
@@ -246,6 +257,7 @@ class MockEmbedder:
 
 class MockLLM:
     """Returns predefined verdict for hallucination tests."""
+
     def __init__(self, verdict="SUPPORTED"):
         self.verdict = verdict
 
@@ -255,7 +267,9 @@ class MockLLM:
 
 def test_hallucination_extract_claims():
     detector = EmbeddingHallucinationDetector(MockEmbedder())
-    claims = detector._extract_claims("This is a claim. This is another one. [Source 1]")
+    claims = detector._extract_claims(
+        "This is a factual claim about the company policy. This is another supporting statement from the context. [Source 1]"
+    )
     assert len(claims) == 2
     assert "[Source 1]" not in claims[1]
 
@@ -277,13 +291,15 @@ def test_hallucination_empty_answer():
 def test_hallucination_risk_level_property():
     assert HallucinationResult(False, 0.0, "test", [], 0.80).risk_level == "LOW"
     assert HallucinationResult(False, 0.0, "test", [], 0.60).risk_level == "MEDIUM"
-    assert HallucinationResult(True,  0.0, "test", [], 0.30).risk_level == "HIGH"
+    assert HallucinationResult(True, 0.0, "test", [], 0.30).risk_level == "HIGH"
 
 
 def test_hallucination_llm_parse_verdict():
     llm = MockLLM()
     detector = LLMHallucinationDetector(llm)
-    result = detector.detect("This is a test claim about something.", ["Some context here."])
+    result = detector.detect(
+        "This is a test claim about something.", ["Some context here."]
+    )
     assert result.method == "llm_nli"
     assert result.faithfulness_score == 1.0
     assert not result.is_hallucination
@@ -299,6 +315,8 @@ def test_hallucination_llm_not_supported():
 
 def test_llm_extract_claims_no_citations():
     detector = LLMHallucinationDetector(MockLLM())
-    claims = detector._extract_claims("Claim one is true. Claim two is also true. [Source 1]")
+    claims = detector._extract_claims(
+        "Claim one is a verified fact from the documents. Claim two is also confirmed by multiple sources. [Source 1]"
+    )
     assert len(claims) == 2
     assert all("[Source" not in c for c in claims)

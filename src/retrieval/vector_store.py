@@ -12,12 +12,11 @@ Why FAISS?
 For very large scale (> 10M docs): consider Qdrant, Milvus, or Weaviate.
 """
 
-import os
 import pickle
 import hashlib
 import numpy as np
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict, Any, Set
+from typing import List, Set
 from dataclasses import dataclass
 from loguru import logger
 
@@ -34,11 +33,11 @@ class SearchResult:
 class FAISSVectorStore:
     """
     FAISS vector store with persistence.
-    
+
     Stores:
       - FAISS index (embeddings)
       - Document list (text + metadata) — pickled alongside index
-    
+
     Index type selection:
       - n < 100k:   IndexFlatIP (exact, fast enough)
       - n > 100k:   IndexIVFFlat (approximate, requires training)
@@ -47,6 +46,7 @@ class FAISSVectorStore:
     def __init__(self, embedding_dim: int, index_type: str = "flat"):
         try:
             import faiss
+
             self.faiss = faiss
         except ImportError:
             raise ImportError("Install FAISS: pip install faiss-cpu")
@@ -65,7 +65,9 @@ class FAISSVectorStore:
             # Approximate — 8× faster at 99% recall for large corpora
             quantiser = self.faiss.IndexFlatIP(dim)
             n_lists = 100  # tune: sqrt(n_docs) is a good heuristic
-            index = self.faiss.IndexIVFFlat(quantiser, dim, n_lists, self.faiss.METRIC_INNER_PRODUCT)
+            index = self.faiss.IndexIVFFlat(
+                quantiser, dim, n_lists, self.faiss.METRIC_INNER_PRODUCT
+            )
             return index
         else:
             raise ValueError(f"Unknown index type: {index_type}")
@@ -74,13 +76,14 @@ class FAISSVectorStore:
         """
         Add documents and their embeddings to the store.
         Duplicate content (same page_content hash) is silently skipped.
-        
+
         Args:
             documents:  List of Document objects
             embeddings: (N, dim) float32 array of normalised embeddings
         """
-        assert len(documents) == len(embeddings), \
+        assert len(documents) == len(embeddings), (
             f"Mismatch: {len(documents)} docs vs {len(embeddings)} embeddings"
+        )
         assert embeddings.dtype == np.float32, "Embeddings must be float32"
 
         unique_docs, unique_embs = [], []
@@ -116,7 +119,7 @@ class FAISSVectorStore:
     ) -> List[SearchResult]:
         """
         Search for the top-k most similar documents.
-        
+
         Returns SearchResult objects sorted by descending similarity score.
         """
         if len(self.documents) == 0:
@@ -130,11 +133,13 @@ class FAISSVectorStore:
         results = []
         for rank, (idx, score) in enumerate(zip(indices[0], scores[0])):
             if idx >= 0:  # FAISS returns -1 for empty slots
-                results.append(SearchResult(
-                    document=self.documents[idx],
-                    score=float(score),
-                    rank=rank + 1,
-                ))
+                results.append(
+                    SearchResult(
+                        document=self.documents[idx],
+                        score=float(score),
+                        rank=rank + 1,
+                    )
+                )
 
         return results
 
@@ -146,7 +151,9 @@ class FAISSVectorStore:
         self.faiss.write_index(self.index, str(save_path / "index.faiss"))
 
         with open(save_path / "documents.pkl", "wb") as f:
-            pickle.dump({"documents": self.documents, "hashes": self._content_hashes}, f)
+            pickle.dump(
+                {"documents": self.documents, "hashes": self._content_hashes}, f
+            )
 
         logger.info(f"Vector store saved to {save_path} ({len(self.documents)} docs)")
 
@@ -169,7 +176,10 @@ class FAISSVectorStore:
             hashes = data["hashes"]
         else:
             documents = data
-            hashes = {hashlib.md5(d.page_content.encode("utf-8")).hexdigest() for d in documents}
+            hashes = {
+                hashlib.md5(d.page_content.encode("utf-8")).hexdigest()
+                for d in documents
+            }
 
         store = cls.__new__(cls)
         store.faiss = faiss

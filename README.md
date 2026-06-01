@@ -1,6 +1,6 @@
 # Enterprise RAG Pipeline
 
-A production-grade Retrieval-Augmented Generation system with hybrid search, hallucination detection, RAGAS evaluation, a REST API, and a Streamlit UI.
+A production-grade Retrieval-Augmented Generation system with hybrid search, query rewriting (Multi-Query + HyDE), adaptive retrieval, context compression, hallucination detection, RAGAS evaluation, a REST API, and a Streamlit UI.
 
 Employees ask natural-language questions about internal documents (PDF, DOCX, HTML, TXT, MD) and get grounded, cited answers.
 
@@ -19,20 +19,25 @@ flowchart TB
 
     subgraph RETRIEVAL
         direction TB
-        B1[User Query] --> B2{Dense + BM25}
+        B1[User Query] --> B1A[Query Rewriter<br/>Multi-Query + HyDE]
+        B1A --> B2{Dense + BM25<br/>per rewritten query}
         A5 --> B2
         A6 --> B2
-        B2 --> B3[RRF Fusion]
+        B2 --> B3[RRF Fusion Across Queries]
         B3 --> B4[Cross-encoder Reranker]
-        B4 --> B5[Top-5 Chunks]
+        B4 --> B5{Adaptive Retrieval}
+        B5 -->|Low confidence| B2
+        B5 --> B6[Top-K Chunks]
     end
 
     subgraph GENERATION
         direction TB
-        B5 --> C1[Prompt: System + Context + Question]
-        C1 --> C2[LLM<br>GPT-4o-mini / Claude]
-        C2 --> C3[Hallucination Detector]
-        C3 --> C4[Answer + Sources + Risk Level]
+        B6 --> C0[Context Compressor<br/>sentence-level relevance]
+        C0 --> C1[Prompt: System + Context + History + Question]
+        C1 --> C2[LLM<br>OpenAI / Anthropic / Gemini]
+        C2 --> C3[Structured JSON Parse<br/>answer + citations + confidence]
+        C3 --> C4[Hallucination Detector]
+        C4 --> C5[Answer + Sources + Confidence + Risk Level]
     end
 ```
 
@@ -54,6 +59,7 @@ Or Docker: `make docker-up` (single command, runs API + UI).
 |--------|----------|-------------|
 | `GET` | `/health` | Health check |
 | `GET` | `/stats` | Pipeline statistics |
+| `GET` | `/files` | Indexed files list |
 | `POST` | `/ingest` | Upload documents (supports `chunk_strategy` param) |
 | `POST` | `/query` | Ask a question, get answer + sources + hallucination check |
 | `POST` | `/query/stream` | Same as `/query` but returns SSE tokens as they're generated |
@@ -76,14 +82,21 @@ curl -X POST http://localhost:8000/ingest \
 ```bash
 curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
-  -d '{"question": "What is the parental leave policy?"}'
+  -d '{"question": "What is the parental leave policy?", "conversation_id": "demo-session-1"}'
 ```
 
-Returns answer with cited `[Source N]` references, retrieved chunks, and hallucination risk level (`LOW` / `MEDIUM` / `HIGH`).
+Returns answer with cited `[Source N]` references, retrieved chunks, optional confidence score, and hallucination risk level (`LOW` / `MEDIUM` / `HIGH`).
+
+Supported request fields:
+
+- `question` (required)
+- `top_k` (optional)
+- `detect_hallucination` (optional)
+- `conversation_id` (optional, enables multi-turn memory)
 
 ### /query/stream
 
-Same body as `/query`, returns Server-Sent Events:
+Same body as `/query` (including optional `conversation_id`), returns Server-Sent Events:
 
 ```
 data: {"type": "retrieval", "content": 5}
@@ -91,7 +104,7 @@ data: {"type": "token", "content": "Primary"}
 data: {"type": "token", "content": " caregivers"}
 data: {"type": "token", "content": " receive"}
 ...
-data: {"type": "sources", "content": {"sources": [...], "has_answer": true, "latency_ms": 842.3}}
+data: {"type": "sources", "content": {"sources": [...], "has_answer": true, "latency_ms": 842.3, "confidence": 0.91}}
 ```
 
 ### /evaluate
@@ -115,13 +128,22 @@ Scores each question on faithfulness, answer relevancy, context precision. Resul
 
 Hallucination risk: **LOW** (>= 0.75), **MEDIUM** (0.50-0.75), **HIGH** (< 0.50).
 
+## RAG Enhancements
+
+- **Query rewriting**: `src/generation/query_rewriter.py` generates alternative phrasings and a HyDE passage.
+- **Multi-query retrieval**: `HybridRetriever.search_multi()` searches each rewrite and fuses with RRF.
+- **Adaptive retrieval**: query path widens search when top retrieval confidence is low.
+- **Context compression**: `src/generation/context_compressor.py` keeps sentence-level evidence most relevant to the query.
+- **Structured output**: model response is parsed from JSON (`answer`, `citations`, `confidence`).
+- **Conversation memory**: `conversation_id` maps to short rolling history (`src/generation/chat_history.py`).
+
 ## Project structure
 
 ```
 src/
   ingestion/     document_loader.py, chunker.py, embedder.py
-  retrieval/     vector_store.py (FAISS), hybrid_retriever.py (BM25 + RRF + reranker)
-  generation/    rag_chain.py (RAGChain, OpenAILLM, AnthropicLLM)
+  retrieval/     vector_store.py (FAISS), hybrid_retriever.py (BM25 + RRF + reranker + search_multi)
+  generation/    rag_chain.py, query_rewriter.py, context_compressor.py, chat_history.py
   evaluation/    ragas_eval.py, hallucination_detector.py
   api/           main.py (FastAPI)
 ui/              app.py (Streamlit)
@@ -151,6 +173,8 @@ data/            sample_docs/, vectorstore/
 - **Sparse retrieval**: BM25 (rank-bm25)
 - **Reranker**: cross-encoder/ms-marco-MiniLM-L-6-v2
 - **Fusion**: Reciprocal Rank Fusion (k=60)
+- **Query expansion**: Multi-Query + HyDE
+- **Compression**: sentence-level context compressor
 - **LLM**: OpenAI GPT-4o-mini or Anthropic Claude
 - **API**: FastAPI + Uvicorn
 - **UI**: Streamlit + Plotly
